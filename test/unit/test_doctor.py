@@ -191,6 +191,30 @@ def test_incomplete_aws_sandbox_configuration_is_error(monkeypatch):
     assert "service url" in result.message.lower() or "api key" in result.message.lower()
 
 
+def test_windows_attribute_reader_returns_before_child_exit(monkeypatch, tmp_path):
+    payload = b'{"flow_name": "test", "run_id": "r1"}'
+    path = tmp_path / "attrs.json"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+    os.write(fd, payload)
+    os.lseek(fd, 0, os.SEEK_SET)
+
+    class FakeProcess:
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    monkeypatch.setattr("metaflow.runner.utils.os.name", "nt")
+    import select as select_module
+    monkeypatch.delattr(select_module, "poll", raising=False)
+
+    result = read_from_fifo_when_ready(fd, type("Cmd", (), {"process": FakeProcess(), "command": ["test"]})(), timeout=1)
+
+    assert result == payload.decode("utf-8")
+    os.close(fd)
+
+
 def test_windows_attribute_reader_reads_full_payload(monkeypatch, tmp_path):
     payload = b'{"flow_name": "test", "run_id": "r1"}' + (b" " * 20000)
     path = tmp_path / "attrs.json"

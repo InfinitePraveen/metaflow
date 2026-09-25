@@ -125,10 +125,14 @@ def read_from_fifo_when_ready(
                 if chunk:
                     content.extend(chunk)
                     read_offset += len(chunk)
+                    if read_offset >= size:
+                        return content.decode(encoding)
                     continue
             except OSError:
                 pass
 
+            if content and check_process_exited(command_obj):
+                return content.decode(encoding)
             if check_process_exited(command_obj):
                 break
             time.sleep(0.05)
