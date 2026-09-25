@@ -188,9 +188,10 @@ class Client(object):
 
         # Make PIPEs non-blocking; this is helpful to be able to
         # order the messages properly
-        for f in (self._server_process.stdout, self._server_process.stderr):
-            fl = fcntl.fcntl(f, fcntl.F_GETFL)
-            fcntl.fcntl(f, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+        if fcntl is not None:
+            for f in (self._server_process.stdout, self._server_process.stderr):
+                fl = fcntl.fcntl(f, fcntl.F_GETFL)
+                fcntl.fcntl(f, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
         # Set up poller
         with self._poller_lock:

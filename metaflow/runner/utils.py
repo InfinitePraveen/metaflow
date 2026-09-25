@@ -4,7 +4,10 @@ import time
 import asyncio
 import tempfile
 import select
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows / unsupported platforms
+    fcntl = None
 from contextlib import contextmanager
 from subprocess import CalledProcessError
 from typing import Any, Dict, TYPE_CHECKING, ContextManager, Tuple
@@ -133,8 +136,9 @@ def read_from_fifo_when_ready(
                 # We got data! Now switch to blocking mode for guaranteed complete reads.
                 # In blocking mode, read() won't return 0 until writer closes AND all
                 # kernel buffers are drained - this is POSIX guaranteed.
-                flags = fcntl.fcntl(fifo_fd, fcntl.F_GETFL)
-                fcntl.fcntl(fifo_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+                if fcntl is not None:
+                    flags = fcntl.fcntl(fifo_fd, fcntl.F_GETFL)
+                    fcntl.fcntl(fifo_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
 
                 # Now do blocking reads until true EOF
                 while True:
