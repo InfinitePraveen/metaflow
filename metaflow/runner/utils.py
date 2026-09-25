@@ -57,20 +57,29 @@ def check_process_exited(
 @contextmanager
 def temporary_fifo() -> ContextManager[Tuple[str, int]]:
     """
-    Create and open the read side of a temporary FIFO in a non-blocking mode.
+    Create and open a temporary file descriptor that can act like a FIFO on
+    platforms without POSIX FIFO support.
 
     Returns
     -------
     str
-        Path to the temporary FIFO.
+        Path to the temporary FIFO-like file.
     int
-        File descriptor of the temporary FIFO.
+        File descriptor of the temporary file.
     """
     with tempfile.TemporaryDirectory() as temp_dir:
         path = os.path.join(temp_dir, "fifo")
-        os.mkfifo(path)
-        # Blocks until the write side is opened unless in non-blocking mode
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(path)
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        else:
+            with open(path, "wb+") as handle:
+                fd = os.open(path, os.O_RDWR | os.O_BINARY)
+                try:
+                    yield path, fd
+                finally:
+                    os.close(fd)
+                return
         try:
             yield path, fd
         finally:
@@ -84,33 +93,35 @@ def read_from_fifo_when_ready(
     timeout: int = 3600,
 ) -> str:
     """
-    Read the content from the FIFO file descriptor when it is ready.
+    Read the content from a temporary FIFO-like file descriptor when it is ready.
 
-    Parameters
-    ----------
-    fifo_fd : int
-        File descriptor of the FIFO.
-    command_obj : CommandManager
-        Command manager object that handles the write side of the FIFO.
-    encoding : str, optional
-        Encoding to use while reading the file, by default "utf-8".
-    timeout : int, optional
-        Timeout for reading the file in seconds, by default 3600.
-
-    Returns
-    -------
-    str
-        Content read from the FIFO.
-
-    Raises
-    ------
-    TimeoutError
-        If no event occurs on the FIFO within the timeout.
-    CalledProcessError
-        If the process managed by `command_obj` has exited without writing any
-        content to the FIFO.
+    On Windows, regular temporary files are used instead of POSIX FIFOs. In that
+    case we poll the file length rather than relying on ``select.poll()``.
     """
     content = bytearray()
+    if not hasattr(select, "poll") or os.name == "nt":
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check_process_exited(command_obj) and command_obj.process.returncode != 0:
+                raise CalledProcessError(
+                    command_obj.process.returncode, command_obj.command
+                )
+            try:
+                os.lseek(fifo_fd, 0, os.SEEK_END)
+                size = os.lseek(fifo_fd, 0, os.SEEK_CUR)
+                if size > 0:
+                    os.lseek(fifo_fd, 0, os.SEEK_SET)
+                    content.extend(os.read(fifo_fd, 8192))
+                    break
+            except OSError:
+                pass
+            time.sleep(0.05)
+        else:
+            raise TimeoutError("Timeout while waiting for the file content")
+        if not content and check_process_exited(command_obj):
+            raise CalledProcessError(command_obj.process.returncode, command_obj.command)
+        return content.decode(encoding)
+
     poll = select.poll()
     poll.register(fifo_fd, select.POLLIN)
     while True:
@@ -123,9 +134,6 @@ def read_from_fifo_when_ready(
             raise TimeoutError("Timeout while waiting for the file content")
 
         poll_begin = time.time()
-        # We poll for a very short time to be also able to check if the file was closed
-        # If the file is closed, we assume that we only have one writer so if we have
-        # data, we break out. This is to work around issues in macos
         events = poll.poll(min(10, timeout * 1000))
         timeout -= time.time() - poll_begin
 
@@ -133,32 +141,19 @@ def read_from_fifo_when_ready(
             data = os.read(fifo_fd, 8192)
             if data:
                 content += data
-                # We got data! Now switch to blocking mode for guaranteed complete reads.
-                # In blocking mode, read() won't return 0 until writer closes AND all
-                # kernel buffers are drained - this is POSIX guaranteed.
                 if fcntl is not None:
                     flags = fcntl.fcntl(fifo_fd, fcntl.F_GETFL)
                     fcntl.fcntl(fifo_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
-
-                # Now do blocking reads until true EOF
                 while True:
                     chunk = os.read(fifo_fd, 8192)
                     if not chunk:
-                        # True EOF - all data drained
                         break
                     content += chunk
-                # All data read, exit main loop
                 break
             else:
                 if len(events):
-                    # We read an EOF -- consider the file done
                     break
-                else:
-                    # We had no events (just a timeout) and the read didn't return
-                    # an exception so the file is still open; we continue waiting for data
-                    pass
         except BlockingIOError:
-            # File not ready yet, continue waiting
             pass
 
     if not content and check_process_exited(command_obj):

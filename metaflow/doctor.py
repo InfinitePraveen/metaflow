@@ -1,11 +1,12 @@
 import os
 import shutil
 import sys
-from dataclasses import dataclass
 from enum import Enum
+from typing import NamedTuple
 
 from metaflow import __version__ as METAFLOW_PACKAGE_VERSION
 from metaflow.metaflow_config import (
+    AWS_SANDBOX_ENABLED,
     DEFAULT_DATASTORE,
     DEFAULT_METADATA,
     KUBERNETES_NAMESPACE,
@@ -23,8 +24,7 @@ class DoctorStatus(str, Enum):
     UNAVAILABLE = "unavailable"
 
 
-@dataclass
-class DoctorCheck:
+class DoctorCheck(NamedTuple):
     name: str
     status: DoctorStatus
     message: str
@@ -131,6 +131,9 @@ def check_metaflow_version():
 
 def check_datastore_configuration():
     datastore = get_default_datastore()
+    supported = {"local"} | {getattr(plugin, "TYPE", None) for plugin in DATASTORES}
+    supported = {name for name in supported if name}
+
     if datastore == "local":
         root = get_datastore_root(datastore)
         if root is None:
@@ -147,7 +150,7 @@ def check_datastore_configuration():
             details="Store root: %s" % root,
         )
 
-    if datastore not in {"s3", "azure", "gs", "spin"}:
+    if datastore not in supported:
         return DoctorCheck(
             "datastore",
             DoctorStatus.ERROR,
@@ -156,19 +159,26 @@ def check_datastore_configuration():
         )
 
     root = get_datastore_root(datastore)
-    if not root:
-        name = {
-            "s3": "METAFLOW_DATASTORE_SYSROOT_S3",
-            "azure": "METAFLOW_DATASTORE_SYSROOT_AZURE",
-            "gs": "METAFLOW_DATASTORE_SYSROOT_GS",
-            "spin": "METAFLOW_DATASTORE_SYSROOT_SPIN",
-        }[datastore]
+    if root is None:
+        if datastore in {"s3", "azure", "gs", "spin"}:
+            name = {
+                "s3": "METAFLOW_DATASTORE_SYSROOT_S3",
+                "azure": "METAFLOW_DATASTORE_SYSROOT_AZURE",
+                "gs": "METAFLOW_DATASTORE_SYSROOT_GS",
+                "spin": "METAFLOW_DATASTORE_SYSROOT_SPIN",
+            }[datastore]
+            return DoctorCheck(
+                "datastore",
+                DoctorStatus.ERROR,
+                "The %s datastore is configured, but its root is missing." % datastore,
+                details="Missing configuration value: %s" % name,
+                remediation="Set %s in your Metaflow config or environment." % name,
+            )
         return DoctorCheck(
             "datastore",
-            DoctorStatus.ERROR,
-            "The %s datastore is configured, but its root is missing." % datastore,
-            details="Missing configuration value: %s" % name,
-            remediation="Set %s in your Metaflow config or environment." % name,
+            DoctorStatus.HEALTHY,
+            "%s datastore is configured." % datastore,
+            details="No explicit root metadata was found for this custom datastore.",
         )
 
     return DoctorCheck(
@@ -181,34 +191,44 @@ def check_datastore_configuration():
 
 def check_metadata_provider_configuration():
     provider = get_default_metadata()
-    if provider == "local":
-        return DoctorCheck(
-            "metadata",
-            DoctorStatus.HEALTHY,
-            "Local metadata provider is active.",
-        )
-    if provider == "spin":
-        return DoctorCheck(
-            "metadata",
-            DoctorStatus.HEALTHY,
-            "Spin metadata provider is active.",
-        )
-    if provider == "service":
-        url = get_service_url()
-        if not url:
+    supported = {getattr(plugin, "TYPE", None) for plugin in METADATA_PROVIDERS}
+    supported = {name for name in supported if name}
+
+    if provider in supported:
+        if provider == "service":
+            url = get_service_url()
+            if not url:
+                return DoctorCheck(
+                    "metadata",
+                    DoctorStatus.ERROR,
+                    "Metadata service is selected but no service URL is configured.",
+                    details="Default metadata provider: service",
+                    remediation="Set METAFLOW_SERVICE_URL or run 'metaflow configure' to initialize the service metadata provider.",
+                )
             return DoctorCheck(
                 "metadata",
-                DoctorStatus.ERROR,
-                "Metadata service is selected but no service URL is configured.",
-                details="Default metadata provider: service",
-                remediation="Set METAFLOW_SERVICE_URL or run 'metaflow configure' to initialize the service metadata provider.",
+                DoctorStatus.HEALTHY,
+                "Metadata service is configured.",
+                details="Metadata URL: %s" % url,
+            )
+        if provider == "local":
+            return DoctorCheck(
+                "metadata",
+                DoctorStatus.HEALTHY,
+                "Local metadata provider is active.",
+            )
+        if provider == "spin":
+            return DoctorCheck(
+                "metadata",
+                DoctorStatus.HEALTHY,
+                "Spin metadata provider is active.",
             )
         return DoctorCheck(
             "metadata",
             DoctorStatus.HEALTHY,
-            "Metadata service is configured.",
-            details="Metadata URL: %s" % url,
+            "%s metadata provider is active." % provider,
         )
+
     return DoctorCheck(
         "metadata",
         DoctorStatus.ERROR,
@@ -219,11 +239,26 @@ def check_metadata_provider_configuration():
 
 def check_aws_configuration():
     if DEFAULT_DATASTORE not in {"s3"}:
+        if AWS_SANDBOX_ENABLED:
+            return DoctorCheck(
+                "aws",
+                DoctorStatus.HEALTHY,
+                "AWS sandbox mode is enabled.",
+                details="Sandbox authentication is configured for Metaflow AWS access.",
+            )
         return DoctorCheck(
             "aws",
             DoctorStatus.UNAVAILABLE,
             "AWS configuration is not required for the current datastore.",
             details="Default datastore: %s" % DEFAULT_DATASTORE,
+        )
+
+    if AWS_SANDBOX_ENABLED:
+        return DoctorCheck(
+            "aws",
+            DoctorStatus.HEALTHY,
+            "AWS sandbox mode is enabled.",
+            details="Sandbox authentication is configured for Metaflow AWS access.",
         )
 
     try:
@@ -267,13 +302,13 @@ def check_aws_configuration():
 def check_kubernetes_configuration():
     kubectl = shutil.which("kubectl")
     namespace = KUBERNETES_NAMESPACE
-    has_k8s_config = bool(namespace)
-    if not has_k8s_config and kubectl is None:
+    explicitly_configured = os.environ.get("METAFLOW_KUBERNETES_NAMESPACE") is not None
+    if namespace == "default" and not explicitly_configured and kubectl is None:
         return DoctorCheck(
             "kubernetes",
             DoctorStatus.UNAVAILABLE,
             "Kubernetes checks are not applicable in this environment.",
-            details="No Kubernetes namespace configuration found and kubectl is not installed.",
+            details="The default namespace is in use and kubectl is not installed.",
             remediation="Install kubectl or set METAFLOW_KUBERNETES_NAMESPACE when using Kubernetes workflows.",
         )
     if kubectl is None:

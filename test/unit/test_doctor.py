@@ -111,3 +111,49 @@ def test_plugin_listing_does_not_fail(monkeypatch):
 
     assert result.status in {DoctorStatus.HEALTHY, DoctorStatus.WARNING}
     assert result.name == "plugins"
+
+
+def test_custom_datastore_plugins_are_accepted(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.get_default_datastore", lambda: "custom")
+    monkeypatch.setattr(
+        "metaflow.doctor.DATASTORES",
+        [type("CustomStore", (), {"TYPE": "custom"})],
+    )
+
+    result = check_datastore_configuration()
+
+    assert result.status == DoctorStatus.HEALTHY
+    assert result.message == "custom datastore is configured."
+
+
+def test_custom_metadata_providers_are_accepted(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.get_default_metadata", lambda: "custom")
+    monkeypatch.setattr(
+        "metaflow.doctor.METADATA_PROVIDERS",
+        [type("CustomProvider", (), {"TYPE": "custom"})],
+    )
+
+    result = check_metadata_provider_configuration()
+
+    assert result.status == DoctorStatus.HEALTHY
+    assert "custom" in result.message.lower()
+
+
+def test_aws_sandbox_mode_is_not_reported_as_missing_credentials(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.DEFAULT_DATASTORE", "s3")
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_ENABLED", True)
+
+    result = check_aws_configuration()
+
+    assert result.status == DoctorStatus.HEALTHY
+    assert "sandbox" in result.message.lower()
+
+
+def test_default_kubernetes_namespace_is_not_warned_when_not_configured(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.KUBERNETES_NAMESPACE", "default")
+    monkeypatch.delenv("METAFLOW_KUBERNETES_NAMESPACE", raising=False)
+    monkeypatch.setattr("metaflow.doctor.shutil.which", lambda name: None)
+
+    result = check_kubernetes_configuration()
+
+    assert result.status == DoctorStatus.UNAVAILABLE

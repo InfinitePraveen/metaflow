@@ -1,4 +1,8 @@
-import fcntl
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows / unsupported platforms
+    fcntl = None
+
 import gc
 import os
 import importlib
