@@ -6,7 +6,10 @@ from typing import NamedTuple
 
 from metaflow import __version__ as METAFLOW_PACKAGE_VERSION
 from metaflow.metaflow_config import (
+    AWS_SANDBOX_API_KEY,
     AWS_SANDBOX_ENABLED,
+    AWS_SANDBOX_REGION,
+    AWS_SANDBOX_STS_ENDPOINT_URL,
     DEFAULT_DATASTORE,
     DEFAULT_METADATA,
     KUBERNETES_NAMESPACE,
@@ -176,9 +179,10 @@ def check_datastore_configuration():
             )
         return DoctorCheck(
             "datastore",
-            DoctorStatus.HEALTHY,
-            "%s datastore is configured." % datastore,
+            DoctorStatus.ERROR,
+            "The %s datastore is configured, but its root is missing." % datastore,
             details="No explicit root metadata was found for this custom datastore.",
+            remediation="Ensure the datastore plugin supplies a valid root or configure the backing store correctly.",
         )
 
     return DoctorCheck(
@@ -238,27 +242,35 @@ def check_metadata_provider_configuration():
 
 
 def check_aws_configuration():
-    if DEFAULT_DATASTORE not in {"s3"}:
-        if AWS_SANDBOX_ENABLED:
+    if AWS_SANDBOX_ENABLED:
+        missing = []
+        if not AWS_SANDBOX_STS_ENDPOINT_URL:
+            missing.append("sandbox service URL")
+        if not AWS_SANDBOX_API_KEY:
+            missing.append("sandbox API key")
+        if not AWS_SANDBOX_REGION:
+            missing.append("sandbox region")
+        if missing:
             return DoctorCheck(
                 "aws",
-                DoctorStatus.HEALTHY,
-                "AWS sandbox mode is enabled.",
-                details="Sandbox authentication is configured for Metaflow AWS access.",
+                DoctorStatus.ERROR,
+                "AWS sandbox mode is enabled, but the sandbox service URL, API key, and/or region are missing.",
+                details="Missing: %s" % ", ".join(missing),
+                remediation="Configure the AWS sandbox endpoint, API key, and region before enabling sandbox access.",
             )
-        return DoctorCheck(
-            "aws",
-            DoctorStatus.UNAVAILABLE,
-            "AWS configuration is not required for the current datastore.",
-            details="Default datastore: %s" % DEFAULT_DATASTORE,
-        )
-
-    if AWS_SANDBOX_ENABLED:
         return DoctorCheck(
             "aws",
             DoctorStatus.HEALTHY,
             "AWS sandbox mode is enabled.",
             details="Sandbox authentication is configured for Metaflow AWS access.",
+        )
+
+    if DEFAULT_DATASTORE not in {"s3"}:
+        return DoctorCheck(
+            "aws",
+            DoctorStatus.UNAVAILABLE,
+            "AWS configuration is not required for the current datastore.",
+            details="Default datastore: %s" % DEFAULT_DATASTORE,
         )
 
     try:
@@ -302,13 +314,12 @@ def check_aws_configuration():
 def check_kubernetes_configuration():
     kubectl = shutil.which("kubectl")
     namespace = KUBERNETES_NAMESPACE
-    explicitly_configured = os.environ.get("METAFLOW_KUBERNETES_NAMESPACE") is not None
-    if namespace == "default" and not explicitly_configured and kubectl is None:
+    if not namespace and kubectl is None:
         return DoctorCheck(
             "kubernetes",
             DoctorStatus.UNAVAILABLE,
             "Kubernetes checks are not applicable in this environment.",
-            details="The default namespace is in use and kubectl is not installed.",
+            details="No Kubernetes namespace configuration found and kubectl is not installed.",
             remediation="Install kubectl or set METAFLOW_KUBERNETES_NAMESPACE when using Kubernetes workflows.",
         )
     if kubectl is None:

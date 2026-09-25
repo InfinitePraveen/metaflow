@@ -1,3 +1,4 @@
+import os
 import sys
 
 import pytest
@@ -19,6 +20,7 @@ from metaflow.doctor import (
     format_diagnostic_report,
     run_diagnostics,
 )
+from metaflow.runner.utils import read_from_fifo_when_ready
 
 
 def test_successful_checks_are_marked_healthy(monkeypatch):
@@ -119,6 +121,7 @@ def test_custom_datastore_plugins_are_accepted(monkeypatch):
         "metaflow.doctor.DATASTORES",
         [type("CustomStore", (), {"TYPE": "custom"})],
     )
+    monkeypatch.setattr("metaflow.doctor.get_datastore_root", lambda _: "/tmp/custom")
 
     result = check_datastore_configuration()
 
@@ -142,6 +145,9 @@ def test_custom_metadata_providers_are_accepted(monkeypatch):
 def test_aws_sandbox_mode_is_not_reported_as_missing_credentials(monkeypatch):
     monkeypatch.setattr("metaflow.doctor.DEFAULT_DATASTORE", "s3")
     monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_ENABLED", True)
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_STS_ENDPOINT_URL", "https://sandbox.example.com")
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_API_KEY", "key")
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_REGION", "us-east-1")
 
     result = check_aws_configuration()
 
@@ -156,4 +162,76 @@ def test_default_kubernetes_namespace_is_not_warned_when_not_configured(monkeypa
 
     result = check_kubernetes_configuration()
 
-    assert result.status == DoctorStatus.UNAVAILABLE
+    assert result.status == DoctorStatus.WARNING
+
+
+def test_custom_datastore_without_root_is_rejected(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.get_default_datastore", lambda: "custom")
+    monkeypatch.setattr(
+        "metaflow.doctor.DATASTORES",
+        [type("CustomStore", (), {"TYPE": "custom"})],
+    )
+    monkeypatch.setattr("metaflow.doctor.get_datastore_root", lambda _: None)
+
+    result = check_datastore_configuration()
+
+    assert result.status == DoctorStatus.ERROR
+    assert "root" in result.message.lower()
+
+
+def test_incomplete_aws_sandbox_configuration_is_error(monkeypatch):
+    monkeypatch.setattr("metaflow.doctor.DEFAULT_DATASTORE", "s3")
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_ENABLED", True)
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_STS_ENDPOINT_URL", "")
+    monkeypatch.setattr("metaflow.doctor.AWS_SANDBOX_API_KEY", None)
+
+    result = check_aws_configuration()
+
+    assert result.status == DoctorStatus.ERROR
+    assert "service url" in result.message.lower() or "api key" in result.message.lower()
+
+
+def test_windows_attribute_reader_reads_full_payload(monkeypatch, tmp_path):
+    payload = b'{"flow_name": "test", "run_id": "r1"}' + (b" " * 20000)
+    path = tmp_path / "attrs.json"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+    os.write(fd, payload)
+    os.lseek(fd, 0, os.SEEK_SET)
+
+    class FakeProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    monkeypatch.setattr("metaflow.runner.utils.os.name", "nt")
+    import select as select_module
+    monkeypatch.delattr(select_module, "poll", raising=False)
+
+    result = read_from_fifo_when_ready(fd, type("Cmd", (), {"process": FakeProcess(), "command": ["test"]})(), timeout=1)
+
+    assert result.startswith('{"flow_name": "test"')
+    assert len(result) > 8192
+    os.close(fd)
+
+
+def test_windows_attribute_reader_returns_on_empty_exit(monkeypatch, tmp_path):
+    path = tmp_path / "attrs.json"
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_TRUNC)
+
+    class FakeProcess:
+        returncode = 0
+
+        @staticmethod
+        def poll():
+            return 0
+
+    monkeypatch.setattr("metaflow.runner.utils.os.name", "nt")
+    import select as select_module
+    monkeypatch.delattr(select_module, "poll", raising=False)
+
+    result = read_from_fifo_when_ready(fd, type("Cmd", (), {"process": FakeProcess(), "command": ["test"]})(), timeout=0.1)
+
+    assert result == ""
+    os.close(fd)

@@ -101,25 +101,43 @@ def read_from_fifo_when_ready(
     content = bytearray()
     if not hasattr(select, "poll") or os.name == "nt":
         deadline = time.time() + timeout
+        read_offset = 0
         while time.time() < deadline:
             if check_process_exited(command_obj) and command_obj.process.returncode != 0:
                 raise CalledProcessError(
                     command_obj.process.returncode, command_obj.command
                 )
             try:
-                os.lseek(fifo_fd, 0, os.SEEK_END)
-                size = os.lseek(fifo_fd, 0, os.SEEK_CUR)
-                if size > 0:
-                    os.lseek(fifo_fd, 0, os.SEEK_SET)
-                    content.extend(os.read(fifo_fd, 8192))
+                os.lseek(fifo_fd, read_offset, os.SEEK_SET)
+                size = os.fstat(fifo_fd).st_size
+            except OSError:
+                size = read_offset
+
+            if size <= read_offset:
+                if check_process_exited(command_obj):
                     break
+                time.sleep(0.05)
+                continue
+
+            try:
+                os.lseek(fifo_fd, read_offset, os.SEEK_SET)
+                chunk = os.read(fifo_fd, 65536)
+                if chunk:
+                    content.extend(chunk)
+                    read_offset += len(chunk)
+                    continue
             except OSError:
                 pass
+
+            if check_process_exited(command_obj):
+                break
             time.sleep(0.05)
         else:
             raise TimeoutError("Timeout while waiting for the file content")
         if not content and check_process_exited(command_obj):
-            raise CalledProcessError(command_obj.process.returncode, command_obj.command)
+            return ""
+        if not content:
+            raise TimeoutError("Timeout while waiting for the file content")
         return content.decode(encoding)
 
     poll = select.poll()
